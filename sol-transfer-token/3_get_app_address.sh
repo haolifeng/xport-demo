@@ -1,0 +1,1 @@
+solana address --keypair=./target/deploy/sol_transfer_token-keypair.json
