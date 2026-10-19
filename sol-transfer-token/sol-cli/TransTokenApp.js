@@ -26,7 +26,11 @@ class TransTokenApp {
         let gateWayPublickKey = new PublicKey(config.scAddrs.gateWayAddr);
 
         let settingAccount = findProgramAddress('settings', this.program.programId);
-        let instructioin = await this.program.methods.initializeSettings(gateWayPublickKey)
+        // Peer (WAN) chain id + app address must be configured at initialization:
+        // they are enforced as a whitelist on both inbound (wmb_receive) and outbound (out_bound_call) paths.
+        let peerChainId = new anchor.BN(config.peer.WanChainId);
+        let peerAppAddr = Buffer.from(config.peer.WanAppScAddr.slice(2), 'hex');
+        let instructioin = await this.program.methods.initializeSettings(gateWayPublickKey, peerChainId, peerAppAddr)
             .accounts({
                     settings:settingAccount.publicKey,
                     authority:this.keypair.publicKey,
@@ -52,6 +56,8 @@ class TransTokenApp {
 
         console.log('gateway: ', setting.gatewayProgram.toString());
         console.log('authority: ', setting.authority.toString());
+        console.log('peer chain id: ', setting.peerChainId.toString());
+        console.log('peer app address: ', Buffer.from(setting.peerAppAddress.slice(0, setting.peerAppAddressLen)).toString('hex'));
     }
     async crossTokenToWan(amount, gaslimit) {
 

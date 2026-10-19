@@ -25,7 +25,9 @@ pub enum CustomError {
     #[msg("Account mismatch: To")]
     AccountMismatchTo,
     #[msg("Account mismatch: Amount")]
-    AccountMismatchAmount
+    AccountMismatchAmount,
+    #[msg("Amount overflow: exceeds u64 range")]
+    AmountOverflow
 }
 
 pub fn encode_message_data(message_data: &MessageData) -> Vec<u8>{
@@ -64,6 +66,11 @@ pub fn decode_message_data(data: &[u8]) -> anchor_lang::Result<MessageData> {
         Token::Uint(u) => u.clone(),
         _ => return Err(CustomError::AccountMismatchAmount.into()),
     };
+
+    // Reject values that would be silently truncated by as_u64()
+    if amount > U256::from(u64::MAX) {
+        return Err(CustomError::AmountOverflow.into());
+    }
 
     let amount = amount.as_u64();
 

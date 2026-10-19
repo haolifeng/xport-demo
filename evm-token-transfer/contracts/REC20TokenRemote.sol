@@ -32,14 +32,21 @@ contract ERC20TokenRemote is WmbAppNoEvm, ERC20 {
         return _DECIMALS;
     }
 
-    function updateHomeAddress(bytes memory _homeAddress, uint256 _homeChainId) public {
+    function updateHomeAddress(bytes memory _homeAddress, uint256 _homeChainId) public onlyOwner {
+        require(_homeAddress.length != 0, "ERC20TokenRemote: empty home address");
+        require(_homeChainId != 0, "ERC20TokenRemote: invalid home chain id");
+        // Revoke trust on the old peer so no dangling trusted remote is left behind
+        if (homeAddress.length != 0) {
+            trustedRemotes[homeChainId][homeAddress] = false;
+            emit SetTrustedRemote(homeChainId, homeAddress, false);
+        }
         homeAddress = _homeAddress;
         homeChainId = _homeChainId;
         setTrustedRemote(_homeChainId, _homeAddress, true);
     }
 
-    function updateWmbGateway(address _wmbGateway) public {
-        wmbGateway = _wmbGateway;
+    function updateWmbGateway(address _wmbGateway) public onlyOwner {
+        _setWmbGateway(_wmbGateway);
     }
         
     
@@ -60,6 +67,11 @@ contract ERC20TokenRemote is WmbAppNoEvm, ERC20 {
         bytes memory from
     ) override internal{
         (bytes memory messageType, bytes memory fromAccount, address  to, uint256 amount) = abi.decode(data, (bytes,bytes, address, uint256));
+
+        // Only accept the message type emitted by the peer app (Solana cross_token_to_evm)
+        require(keccak256(messageType) == keccak256("cross_token"), "ERC20TokenRemote: invalid message type");
+        require(to != address(0), "ERC20TokenRemote: mint to zero address");
+        require(amount > 0, "ERC20TokenRemote: amount must be greater than 0");
 
         _mint(to, amount);
         emit ReceiveTokenFromHome(fromChainId, fromAccount, to, amount);

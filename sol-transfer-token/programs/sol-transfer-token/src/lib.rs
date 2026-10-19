@@ -29,6 +29,8 @@ use constants::*;
 
 use utils::*;
 
+use crate::errors::Errors;
+
 pub mod message_data;
 
 use message_data::*;
@@ -46,11 +48,26 @@ pub mod sol_transfer_token {
 
 
 
-    pub fn initialize_settings(ctx: Context<InitializeSettings>, gateway_program: Pubkey) -> Result<()> {
+    pub fn initialize_settings(ctx: Context<InitializeSettings>, gateway_program: Pubkey, peer_chain_id: u128, peer_app_address: Vec<u8>) -> Result<()> {
+        require!(!peer_app_address.is_empty() && peer_app_address.len() <= 32, Errors::InvalidPeerAddress);
         let settings = &mut ctx.accounts.settings;
         settings.gateway_program = gateway_program;
         settings.authority = ctx.accounts.authority.key();
+        settings.peer_chain_id = peer_chain_id;
+        settings.peer_app_address = to_fixed32(&peer_app_address);
+        settings.peer_app_address_len = peer_app_address.len() as u8;
         msg!("Settings initialized with gateway_program: {}", gateway_program);
+        Ok(())
+    }
+
+    /// Update the trusted peer (chain id + peer app address). Authority only.
+    pub fn update_peer(ctx: Context<UpdateSettings>, peer_chain_id: u128, peer_app_address: Vec<u8>) -> Result<()> {
+        require!(!peer_app_address.is_empty() && peer_app_address.len() <= 32, Errors::InvalidPeerAddress);
+        let settings = &mut ctx.accounts.settings;
+        settings.peer_chain_id = peer_chain_id;
+        settings.peer_app_address = to_fixed32(&peer_app_address);
+        settings.peer_app_address_len = peer_app_address.len() as u8;
+        msg!("Updated peer chain_id: {}, peer_app_address len: {}", peer_chain_id, peer_app_address.len());
         Ok(())
     }
 
@@ -72,8 +89,8 @@ pub mod sol_transfer_token {
         msg!("WmbReceive called with {} bytes", data.len());
         msg!("wmb_receive(2) of program: {:?}, data: {:?}", ctx.program_id, data);
 
-        // Temporarily hardcoded Gate-Way program ID
-        let expected_gateway_program = Pubkey::from_str("9J17hVJXCcMsD1E7Kv5yNKEgQAhwcu4NvtPQvXkgesiV").unwrap();
+        // Only the configured Gate-Way program may deliver inbound messages
+        let expected_gateway_program = ctx.accounts.settings.gateway_program;
         msg!("wmb_receive() expected_delegate_program is: {:?}", expected_gateway_program);
 
         verify_cpi_caller(&ctx.accounts.cpi_authority, expected_gateway_program, Errors::NotMatchWithCpiSigner)?;
@@ -81,11 +98,17 @@ pub mod sol_transfer_token {
         // First decode inbound payload as InBoundFunctionCallData (borsh)
         let inbound = InBoundFunctionCallData::try_from_slice(&data)?;
 
-        // TODO: verify inbound.network_id and inbound.contract_address for safety. For example, check them if thm are in white-list.
+        // Verify the source chain and source app against the configured peer (whitelist)
+        require!(inbound.network_id == ctx.accounts.settings.peer_chain_id, Errors::UntrustedPeer);
+        let peer_len = ctx.accounts.settings.peer_app_address_len as usize;
+        require!(
+            inbound.contract_address.len() == peer_len
+                && inbound.contract_address.as_slice() == &ctx.accounts.settings.peer_app_address[..peer_len],
+            Errors::UntrustedPeer
+        );
 
         msg!("Inbound payload -> network_id: {:?}", inbound.network_id);
         msg!("Inbound payload -> contract_address len: {:?}", inbound.contract_address.len());
-        msg!("Inbound payload -> contract_address: {:?}", inbound.contract_address);
 
         let function_call_data = FunctionCallData::try_from_slice(&inbound.func_call_data)?;
 
@@ -96,14 +119,18 @@ pub mod sol_transfer_token {
                 msg!("Successfully decoded message data:");
 
                 match message_data.message_type.as_str() {
+                    // "unlockToken" is the only type emitted by the peer app (EVM send())
                     "unlockToken" => {
                         msg!("Processing Message from {:?}", message_data.from);
-                        msg!("Processing Message to {:?}", message_data.to);
                         msg!("Processing Message amount {:?}", message_data.amount);
 
+                        require!(message_data.amount > 0, Errors::AmountShouldGreatThanZero);
+                        // NOTE: when the unlock transfer is implemented, message_data.to must be
+                        // validated against the owner of the destination token account.
                     },
                     _=> {
                         msg!("Unknown message type: {}", message_data.message_type);
+                        return Err(Errors::NotMatchMessageType.into());
                     }
                 }
 
@@ -195,6 +222,16 @@ pub mod sol_transfer_token {
     pub fn out_bound_call<'info>(ctx: Context<'_, '_, '_, 'info, CrossTokenToEvmAccounts<'info>>, peer_chain_id:u128, peer_app_address:Vec<u8>, function_call_data:Vec<u8>, gas_limit: u64) -> Result<()> {
         msg!("out_bound_call of program: {:?}", ctx.program_id);
 
+        // Outbound messages may only be sent to the configured peer app
+        let settings = &ctx.accounts.settings;
+        require!(peer_chain_id == settings.peer_chain_id, Errors::UntrustedPeer);
+        let peer_len = settings.peer_app_address_len as usize;
+        require!(
+            peer_app_address.len() == peer_len
+                && peer_app_address.as_slice() == &settings.peer_app_address[..peer_len],
+            Errors::UntrustedPeer
+        );
+
         let curr_app_address = ctx.program_id.to_bytes();
 
         let params = OutBoundParams{
@@ -207,7 +244,7 @@ pub mod sol_transfer_token {
 
         let mut ix_data = Vec::new();
         let r1 = constants::GATEWAY_OUTBOUND_CALL_IX_ID; // Gate-Way program outbound_call discriminator
-        let r2 = params.try_to_vec().unwrap();
+        let r2 = params.try_to_vec()?;
 
         ix_data.extend_from_slice(&r1);
         ix_data.extend_from_slice(&r2);
@@ -246,6 +283,10 @@ pub mod sol_transfer_token {
 
     pub fn cross_token_to_evm<'info>(ctx: Context<'_,'_,'_,'info, CrossTokenToEvmAccounts<'info>>, peer_chain_id:u128, peer_app_address:Vec<u8>,to:Vec<u8>, amount:u64, gas_limit: u64)-> Result<()> {
 
+        require!(amount > 0, Errors::AmountShouldGreatThanZero);
+        // `to` is the EVM receiver; encode_message_data() encodes it as an ethabi Address
+        // and would panic on a non-20-byte value
+        require!(to.len() == 20, Errors::InvalidReceiverAddress);
 
         let cross_message_data = message_data::MessageData {
             message_type:"cross_token".to_string(),
@@ -297,7 +338,10 @@ pub struct CrossTokenToEvmAccounts<'info> {
     /// CHECK: gate-way program will check this
     pub cpi_signer: UncheckedAccount<'info>,
 
-    /// CHECK: Gate-Way program that will be called via CPI
+    /// CHECK: Gate-Way program that will be called via CPI. Must match the configured gateway.
+    #[account(
+        constraint = gateway_program.key() == settings.gateway_program @ Errors::NotMatchWithGateway
+    )]
     pub gateway_program: UncheckedAccount<'info>,
 
     /// Nonce account for the gate-way program (will be derived)
@@ -322,7 +366,7 @@ pub struct InitializeSettings<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 32, // discriminator + 2 Pubkeys
+        space = 8 + 32 + 32 + 16 + 32 + 1, // discriminator + 2 Pubkeys + peer_chain_id(u128) + peer_app_address([u8;32]) + len
         seeds = [b"settings"],
         bump
     )]
@@ -346,6 +390,12 @@ pub struct UpdateSettings<'info> {
 
 #[derive(Accounts)]
 pub struct WmbReceiveAccount<'info> {
+    #[account(
+        seeds = [b"settings"],
+        bump
+    )]
+    pub settings: Account<'info, Settings>,
+
     /// CHECK: CPI Authority
     pub cpi_authority: Signer<'info>,  // parent program/ caller
 
@@ -405,6 +455,16 @@ pub struct FunctionCallData {
 pub struct Settings {
     pub gateway_program: Pubkey,
     pub authority: Pubkey,
+    pub peer_chain_id: u128,
+    pub peer_app_address: [u8; 32],
+    pub peer_app_address_len: u8,
+}
+
+/// Copy a variable-length address (e.g. 20-byte EVM address) into a fixed [u8; 32]
+fn to_fixed32(addr: &[u8]) -> [u8; 32] {
+    let mut fixed = [0u8; 32];
+    fixed[..addr.len()].copy_from_slice(addr);
+    fixed
 }
 // Define MessageData struct equivalent to Solidity's struct
 // Used for both inbound and outbound operations

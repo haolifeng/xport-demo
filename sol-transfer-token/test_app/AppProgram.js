@@ -27,7 +27,12 @@ class AppProgram {
 
         let settingAccount = findProgramAddress('settings',this.appProgram.programId);
 
-        let instructioin = await this.appProgram.methods.initializeSettings(gateWayPublicKey)
+        // Peer (WAN) chain id + app address are stored in settings and enforced
+        // as a whitelist on both inbound and outbound messages.
+        let peerChainId = new anchor.BN(config.WanChainId);
+        let peerAppAddr = Buffer.from(config.WanAppScAddr.slice(2), 'hex');
+
+        let instructioin = await this.appProgram.methods.initializeSettings(gateWayPublicKey, peerChainId, peerAppAddr)
             .accounts({
                 settings:settingAccount.publicKey,
                 authority:this.wallet.publicKey,
@@ -53,6 +58,8 @@ class AppProgram {
 
         console.log('gateway: ', setting.gatewayProgram.toString());
         console.log('authority: ', setting.authority.toString());
+        console.log('peer chain id: ', setting.peerChainId.toString());
+        console.log('peer app address: ', Buffer.from(setting.peerAppAddress.slice(0, setting.peerAppAddressLen)).toString('hex'));
     }
     async crossTokenToEvm() {
 
@@ -111,7 +118,7 @@ class AppProgram {
         let instruction = await this.appProgram.methods.crossTokenToEvm(
             peer_chain_id,
             peer_app_address,
-            Buffer.from(peerUserAddr.slice(2)),
+            Buffer.from(peerUserAddr.slice(2), 'hex'),
              new anchor.BN(10), new anchor.BN(300))
             .accounts({
                 settings:settingAccount.publicKey,

@@ -8,6 +8,9 @@ const Erc20TokenRemote = require('./Erc20TokenRemote');
 let tokenRomte = new Erc20TokenRemote(config.nodeUrl, config.tokenTransferScAddr);
 
 
+// NOTE: since the security fix, wmbReceiveNonEvm() can only be called by the WMB gateway
+// contract with a fresh (non-replayed) messageId. This script will revert when called
+// directly by an EOA — it is kept only as a reference of the expected payload format.
 const wmbReceiveNonEvm = async ()=> {
     let words = config.words;
 
